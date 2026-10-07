@@ -4,7 +4,7 @@
 VAGRANTFILE_API_VERSION = "2"
 
 Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
-  config.vm.box = "geerlingguy/debian9"
+  config.vm.box = "geerlingguy/debian11"
   config.ssh.insert_key = false
   config.vm.provider "virtualbox"
 
@@ -26,15 +26,6 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     config.vm.define opts[:name] do |config|
       config.vm.hostname = opts[:name] + ".k8s.test"
       config.vm.network "private_network", ip: opts[:ip]
-
-      # Provision all the VMs using Ansible after last VM is up.
-      if opts[:name] == "node2"
-        config.vm.provision "ansible" do |ansible|
-          ansible.playbook = "main.yml"
-          ansible.inventory_path = "inventory"
-          ansible.limit = "all"
-        end
-      end
     end
   end
 
