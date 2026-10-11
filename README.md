@@ -10,7 +10,30 @@ This is an example Kubernetes cluster built and managed with Ansible. The exampl
   2. Download and install [Vagrant](http://www.vagrantup.com/downloads.html).
   3. [Mac/Linux only] Install [Ansible](https://docs.ansible.com/ansible/latest/installation_guide/intro_installation.html).
 
-Note for Windows users: *This guide assumes you're on a Mac or Linux host. Windows hosts are unsupported at this time.*
+On Windows, run Vagrant with Command Prompt and Ansible inside WSL Ubuntu as described below.
+
+### Windows + WSL
+
+Run in Command Prompt from this repository and wait for all three VMs to finish booting:
+
+```bat
+vagrant up
+```
+
+Then run in WSL Ubuntu from the same repository:
+
+```bash
+cd /mnt/d/Documents/proj01_ansible_deploying_a_microservice_application_on_k8s_with_ansible_and_helm
+ansible-playbook -i inventory main.yml
+```
+
+The inventory expects the Vagrant insecure SSH key at `~/.vagrant.d/insecure_private_key` inside WSL, with permissions `0600`. If it is missing, copy it from the Windows Vagrant home into that location. Use the Ubuntu distribution explicitly when the default WSL distribution is Docker Desktop (`wsl -d Ubuntu-26.04`).
+
+The playbook waits for SSH after VM creation, disables swap, enables IPv4 forwarding, and configures containerd CRI with systemd cgroups before Kubernetes initialization. It installs the vendored Flannel v0.25.7 manifest using the Vagrant private interface `enp0s8`. The Kubernetes role receives each VM's private IP through `kubernetes_kubelet_extra_args`. No edits to downloaded Galaxy roles are required, so reinstalling dependencies does not erase the project's host configuration. The playbook waits for Flannel on every node, all three nodes to be Ready, and CoreDNS to be available before reporting success.
+
+The containerd configuration disables the unused NRI integration to avoid waiting on its initialization in this lab.
+
+To validate a completely fresh installation, run `vagrant destroy -f` in Command Prompt, then repeat `vagrant up` and the WSL playbook command. This deletes all data inside these three VMs.
 
 ### 2 - Build the Virtual Machine
 
