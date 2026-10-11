@@ -9,8 +9,8 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   config.vm.provider "virtualbox"
 
   config.vm.provider :virtualbox do |v|
-    v.memory = 1536
-    v.cpus = 1
+    v.memory = 2048
+    v.cpus = 2
     v.linked_clone = true
   end
 
