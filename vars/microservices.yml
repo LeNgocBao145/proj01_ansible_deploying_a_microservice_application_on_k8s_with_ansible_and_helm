@@ -1,0 +1,39 @@
+---
+# The upstream charts target EKS. Keep the upstream clone unchanged and pass
+# these environment-specific values to Helm at deployment time.
+microservice_source: https://github.com/iankisali/microservice-deployment.git
+microservice_source_version: main
+microservice_source_path: /opt/microservice-deployment
+microservice_namespace: microservice
+
+microservice_common_values:
+  appReplicas: 1
+
+microservice_releases:
+  - name: adservice
+    values_file: values/ad-service-values.yaml
+  - name: cartservice
+    values_file: values/cart-service-values.yaml
+  - name: checkoutservice
+    values_file: values/checkout-service-values.yaml
+    overrides:
+      appName: checkoutservice
+  - name: currencyservice
+    values_file: values/currency-service-values.yaml
+  - name: emailservice
+    values_file: values/email-service-values.yaml
+  - name: frontendservice
+    values_file: values/frontend-values.yaml
+    overrides:
+      serviceType: NodePort
+  - name: paymentservice
+    values_file: values/payment-service-values.yaml
+  - name: productcatalogservice
+    values_file: values/productcatalog-service-values.yaml
+  - name: recommendationservice
+    values_file: values/recommendation-service-values.yaml
+  - name: shippingservice
+    values_file: values/shipping-service-values.yaml
+  - name: redis-cart
+    chart: chart/redis
+    values_file: values/redis-values.yaml

@@ -1,0 +1,80 @@
+---
+- name: Deploy Online Boutique with the upstream Helm charts
+  hosts: k8s-master
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - ../vars/microservices.yml
+
+  roles:
+    - role: geerlingguy.helm
+
+  tasks:
+    - name: Ensure pip is installed.
+      ansible.builtin.apt:
+        name: python3-pip
+        state: present
+
+    - name: Install Python libraries required by Kubernetes modules.
+      ansible.builtin.pip:
+        executable: pip3
+        name:
+          - kubernetes==29.0.0
+          - PyYAML>=6.0
+          - jsonpatch>=1.32
+        state: present
+
+    - name: Clone the upstream charts without modifying them.
+      ansible.builtin.git:
+        repo: "{{ microservice_source }}"
+        dest: "{{ microservice_source_path }}"
+        version: "{{ microservice_source_version }}"
+        update: true
+
+    - name: Create the application namespace.
+      kubernetes.core.k8s:
+        kubeconfig: /etc/kubernetes/admin.conf
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ microservice_namespace }}"
+
+    - name: Install all eleven application components with Helm.
+      kubernetes.core.helm:
+        name: "{{ item.name }}"
+        chart_ref: "{{ microservice_source_path }}/{{ item.chart | default('chart/microservice') }}"
+        release_namespace: "{{ microservice_namespace }}"
+        kubeconfig: /etc/kubernetes/admin.conf
+        values_files:
+          - "{{ microservice_source_path }}/{{ item.values_file }}"
+        values: "{{ microservice_common_values | combine(item.overrides | default({})) }}"
+        state: present
+        wait: true
+        timeout: 10m0s
+      loop: "{{ microservice_releases }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Read the frontend Service.
+      kubernetes.core.k8s_info:
+        kubeconfig: /etc/kubernetes/admin.conf
+        api_version: v1
+        kind: Service
+        name: frontend
+        namespace: "{{ microservice_namespace }}"
+      register: frontend_service
+      until: >-
+        frontend_service.resources | length > 0 and
+        frontend_service.resources[0].spec.ports[0].nodePort is defined
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Print the Online Boutique URL.
+      ansible.builtin.debug:
+        msg: >-
+          Online Boutique is available at
+          http://{{ hostvars[groups['k8s-nodes'][0]].ansible_host }}:{{ frontend_service.resources[0].spec.ports[0].nodePort }}/
