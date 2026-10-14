@@ -5,12 +5,61 @@
   gather_facts: true
 
   vars_files:
+    - ../vars/helm.yml
     - ../vars/microservices.yml
 
   roles:
     - role: geerlingguy.helm
 
   tasks:
+    - name: Check whether the required Helm Diff version is installed.
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/helm
+          - diff
+          - version
+      register: helm_diff_check
+      changed_when: false
+      failed_when: false
+
+    - name: Remove an incompatible or broken Helm Diff plugin.
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/helm
+          - plugin
+          - uninstall
+          - diff
+      when: >-
+        helm_diff_check.rc != 0 or
+        helm_diff_version not in helm_diff_check.stdout
+      changed_when: false
+      failed_when: false
+
+    - name: Install the required Helm Diff version.
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/helm
+          - plugin
+          - install
+          - "{{ helm_diff_repository }}"
+          - --version
+          - "{{ helm_diff_version }}"
+      when: >-
+        helm_diff_check.rc != 0 or
+        helm_diff_version not in helm_diff_check.stdout
+
+    - name: Verify Helm Diff is available to the deployment user.
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/helm
+          - diff
+          - version
+      register: helm_diff_verified
+      changed_when: false
+      failed_when: >-
+        helm_diff_verified.rc != 0 or
+        helm_diff_version not in helm_diff_verified.stdout
+
     - name: Ensure pip is installed.
       ansible.builtin.apt:
         name: python3-pip
