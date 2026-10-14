@@ -86,6 +86,28 @@
              | join(', ') }}
         success_msg: All eleven application Deployments are present.
 
+    - name: Read the checkoutservice Service.
+      kubernetes.core.k8s_info:
+        kubeconfig: /etc/kubernetes/admin.conf
+        api_version: v1
+        kind: Service
+        name: checkoutservice
+        namespace: "{{ microservice_namespace }}"
+      register: checkoutservice_service
+      changed_when: false
+
+    - name: Confirm checkoutservice is exposed under the expected service name.
+      ansible.builtin.assert:
+        that:
+          - checkoutservice_service.resources | length == 1
+          - checkoutservice_service.resources[0].spec.selector.app == 'checkoutservice'
+        fail_msg: >-
+          The checkoutservice Service is missing or does not select pods labeled
+          app=checkoutservice. Check the upstream chart values and the appName
+          override in vars/microservices.yml.
+        success_msg: >-
+          The checkoutservice Service exists and selects the expected checkoutservice pods.
+
     - name: Confirm each application Deployment has all replicas available.
       ansible.builtin.assert:
         that:
