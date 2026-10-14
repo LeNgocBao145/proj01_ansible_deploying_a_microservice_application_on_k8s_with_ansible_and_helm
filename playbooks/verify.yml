@@ -1,0 +1,151 @@
+---
+- name: Verify and use the Online Boutique application
+  hosts: k8s-master
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../vars/microservices.yml
+
+  vars:
+    microservice_expected_deployments:
+      - adservice
+      - cartservice
+      - checkoutservice
+      - currencyservice
+      - emailservice
+      - frontend
+      - paymentservice
+      - productcatalogservice
+      - recommendationservice
+      - shippingservice
+      - redis-cart
+  tasks:
+    - name: Read Kubernetes nodes.
+      kubernetes.core.k8s_info:
+        kubeconfig: /etc/kubernetes/admin.conf
+        api_version: v1
+        kind: Node
+      register: cluster_nodes
+      changed_when: false
+
+    - name: Confirm all inventory nodes are registered and Ready.
+      ansible.builtin.assert:
+        that:
+          - item in (cluster_nodes.resources | map(attribute='metadata.name') | list)
+          - >-
+            hostvars[item].ansible_host in
+            (
+              cluster_nodes.resources
+              | map(attribute='status.addresses')
+              | flatten
+              | selectattr('type', 'equalto', 'InternalIP')
+              | map(attribute='address')
+              | list
+            )
+          - >-
+            (
+              cluster_nodes.resources
+              | selectattr('metadata.name', 'equalto', item)
+              | map(attribute='status.conditions')
+              | flatten
+              | selectattr('type', 'equalto', 'Ready')
+              | map(attribute='status')
+              | first
+              | default('False')
+            ) == 'True'
+        fail_msg: >-
+          Node {{ item }} is missing, is not Ready, or does not advertise its
+          inventory private IP {{ hostvars[item].ansible_host }} as InternalIP.
+        success_msg: >-
+          Node {{ item }} is registered, Ready, and uses its inventory private IP.
+      loop: "{{ groups['k8s'] }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Read application Deployments.
+      kubernetes.core.k8s_info:
+        kubeconfig: /etc/kubernetes/admin.conf
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ microservice_namespace }}"
+      register: application_deployments
+      changed_when: false
+
+    - name: Confirm all eleven application Deployments exist.
+      ansible.builtin.assert:
+        that:
+          - >-
+            microservice_expected_deployments
+            | difference(application_deployments.resources | map(attribute='metadata.name') | list)
+            | length == 0
+        fail_msg: >-
+          Missing Deployments:
+          {{ microservice_expected_deployments
+             | difference(application_deployments.resources | map(attribute='metadata.name') | list)
+             | join(', ') }}
+        success_msg: All eleven application Deployments are present.
+
+    - name: Confirm each application Deployment has all replicas available.
+      ansible.builtin.assert:
+        that:
+          - item.status.availableReplicas | default(0) | int >= item.spec.replicas | int
+        fail_msg: >-
+          Deployment {{ item.metadata.name }} has
+          {{ item.status.availableReplicas | default(0) }} available replica(s),
+          expected {{ item.spec.replicas }}.
+        success_msg: >-
+          Deployment {{ item.metadata.name }} has all requested replicas available.
+      loop: "{{ application_deployments.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
+    - name: Read the frontend Service.
+      kubernetes.core.k8s_info:
+        kubeconfig: /etc/kubernetes/admin.conf
+        api_version: v1
+        kind: Service
+        name: frontend
+        namespace: "{{ microservice_namespace }}"
+      register: frontend_service
+      changed_when: false
+
+    - name: Confirm the frontend Service exists.
+      ansible.builtin.assert:
+        that:
+          - frontend_service.resources | length == 1
+        fail_msg: The frontend Service is missing.
+
+    - name: Confirm the frontend Service has a NodePort port.
+      ansible.builtin.assert:
+        that:
+          - frontend_service.resources[0].spec.type == 'NodePort'
+          - frontend_service.resources[0].spec.ports | length > 0
+          - frontend_service.resources[0].spec.ports[0].nodePort is defined
+        fail_msg: The frontend Service is not configured with a NodePort.
+        success_msg: >-
+          Frontend NodePort is
+          {{ frontend_service.resources[0].spec.ports[0].nodePort }}.
+
+    - name: Request the storefront through a worker NodePort.
+      ansible.builtin.uri:
+        url: "http://{{ hostvars[groups['k8s-nodes'][0]].ansible_host }}:{{ frontend_service.resources[0].spec.ports[0].nodePort }}/"
+        method: GET
+        return_content: true
+        status_code: 200
+        timeout: 30
+      register: storefront_response
+      changed_when: false
+
+    - name: Confirm the response is the Online Boutique storefront.
+      ansible.builtin.assert:
+        that:
+          - "'online boutique' in (storefront_response.content | lower)"
+        fail_msg: The frontend returned HTTP 200 but its response did not identify Online Boutique.
+        success_msg: The Online Boutique storefront returned HTTP 200.
+
+    - name: Print the verified storefront URL.
+      ansible.builtin.debug:
+        msg: >-
+          Online Boutique is available at
+          http://{{ hostvars[groups['k8s-nodes'][0]].ansible_host }}:{{ frontend_service.resources[0].spec.ports[0].nodePort }}/
