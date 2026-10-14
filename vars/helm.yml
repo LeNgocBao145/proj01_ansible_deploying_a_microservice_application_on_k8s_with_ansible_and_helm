@@ -1,0 +1,5 @@
+---
+# Pin the Helm CLI and Helm Diff plugin used by the deployment playbook.
+helm_version: "v3.18.0"
+helm_diff_version: "3.15.15"
+helm_diff_repository: https://github.com/databus23/helm-diff
