@@ -1,0 +1,158 @@
+---
+- name: Scale the frontend and demonstrate a protected worker drain
+  hosts: k8s-master
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../vars/helm.yml
+    - ../vars/microservices.yml
+    - ../vars/resource-profiles.yml
+    - ../vars/scaling.yml
+
+  roles:
+    - role: geerlingguy.helm
+
+  tasks:
+    - name: Validate the scaling and drain inputs.
+      ansible.builtin.assert:
+        that:
+          - scale_replicas | int >= 2
+          - pdb_min_available | int >= 1
+          - pdb_min_available | int < scale_replicas | int
+          - drain_worker in groups['k8s-nodes']
+        fail_msg: >-
+          The frontend needs at least two replicas, the PDB must allow one
+          disruption, and drain_worker must be a worker in the inventory.
+
+    - name: Ensure pip is installed.
+      ansible.builtin.apt:
+        name: python3-pip
+        state: present
+
+    - name: Install Python libraries required by Kubernetes modules.
+      ansible.builtin.pip:
+        executable: pip3
+        name:
+          - kubernetes==29.0.0
+          - PyYAML>=6.0
+          - jsonpatch>=1.32
+        state: present
+
+    - name: Create the vendored chart parent directory.
+      ansible.builtin.file:
+        path: "{{ microservice_vendored_chart_path | dirname }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy the vendored microservice chart to the control plane.
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../charts/microservice/"
+        dest: "{{ microservice_vendored_chart_path }}/"
+        mode: preserve
+
+    - name: Select the frontend Helm release configuration.
+      ansible.builtin.set_fact:
+        frontend_release: "{{ microservice_releases | selectattr('name', 'equalto', scale_release) | first }}"
+
+    - name: Scale the frontend through its Helm release using Ansible.
+      kubernetes.core.helm:
+        name: "{{ frontend_release.name }}"
+        chart_ref: "{{ microservice_vendored_chart_path }}"
+        release_namespace: "{{ microservice_namespace }}"
+        kubeconfig: /etc/kubernetes/admin.conf
+        values_files:
+          - "{{ microservice_source_path }}/{{ frontend_release.values_file }}"
+        values: >-
+          {{ microservice_common_values
+             | combine(frontend_release.overrides | default({}), recursive=true)
+             | combine({'appReplicas': scale_replicas | int}, recursive=true)
+             | combine({'resources': microservice_resource_profiles.get(scale_workload, {})}, recursive=true) }}
+        state: present
+        wait: true
+        timeout: 10m0s
+
+    - name: Read the scaled frontend Deployment.
+      kubernetes.core.k8s_info:
+        kubeconfig: /etc/kubernetes/admin.conf
+        api_version: apps/v1
+        kind: Deployment
+        name: "{{ scale_workload }}"
+        namespace: "{{ microservice_namespace }}"
+      register: scaled_frontend
+      until: >-
+        scaled_frontend.resources | length == 1 and
+        scaled_frontend.resources[0].status.availableReplicas | default(0) | int
+        >= scale_replicas | int
+      retries: 60
+      delay: 10
+      changed_when: false
+
+    - name: Protect one available frontend replica during voluntary disruption.
+      kubernetes.core.k8s:
+        kubeconfig: /etc/kubernetes/admin.conf
+        state: present
+        definition:
+          apiVersion: policy/v1
+          kind: PodDisruptionBudget
+          metadata:
+            name: frontend-pdb
+            namespace: "{{ microservice_namespace }}"
+          spec:
+            minAvailable: "{{ pdb_min_available | int }}"
+            selector:
+              matchLabels:
+                app: "{{ scale_workload }}"
+
+    - name: Drain the selected worker and always make it schedulable again.
+      block:
+        - name: Evict the worker's pods while honoring PodDisruptionBudgets.
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - --kubeconfig=/etc/kubernetes/admin.conf
+              - drain
+              - "{{ drain_worker }}"
+              - --ignore-daemonsets
+              - --delete-emptydir-data
+              - --timeout=10m
+          register: drain_result
+          changed_when: drain_result.rc == 0
+      always:
+        - name: Uncordon the worker after the drain attempt.
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - --kubeconfig=/etc/kubernetes/admin.conf
+              - uncordon
+              - "{{ drain_worker }}"
+          changed_when: false
+
+    - name: Show the drain and eviction evidence.
+      ansible.builtin.debug:
+        var: drain_result.stdout_lines
+
+    - name: Wait for frontend replicas to be available after the worker returns.
+      kubernetes.core.k8s_info:
+        kubeconfig: /etc/kubernetes/admin.conf
+        api_version: apps/v1
+        kind: Deployment
+        name: "{{ scale_workload }}"
+        namespace: "{{ microservice_namespace }}"
+      register: frontend_after_drain
+      until: >-
+        frontend_after_drain.resources | length == 1 and
+        frontend_after_drain.resources[0].status.availableReplicas | default(0) | int
+        >= scale_replicas | int
+      retries: 60
+      delay: 10
+      changed_when: false
+
+    - name: Explain the observed disruption budget.
+      ansible.builtin.debug:
+        msg: >-
+          The frontend now has {{ scale_replicas }} replicas and minAvailable={{ pdb_min_available }}.
+          Kubernetes may evict a frontend pod only while at least
+          {{ pdb_min_available }} remains available. The worker was uncordoned
+          at the end of the drain. --delete-emptydir-data can discard transient
+          data on pods that use emptyDir, including the demo Redis cart.

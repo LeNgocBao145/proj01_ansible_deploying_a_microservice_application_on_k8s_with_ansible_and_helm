@@ -1,0 +1,6 @@
+---
+scale_release: frontendservice
+scale_workload: frontend
+scale_replicas: 2
+drain_worker: node1
+pdb_min_available: 1
