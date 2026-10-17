@@ -1,0 +1,9 @@
+---
+# Pin the Traefik chart because the cluster is Kubernetes 1.29.
+traefik_chart_version: "41.2.0"
+traefik_chart_repository_name: traefik
+traefik_chart_repository_url: https://traefik.github.io/charts
+ingress_controller_namespace: ingress-system
+ingress_release_name: traefik
+ingress_host: boutique.test
+ingress_http_node_port: 30080

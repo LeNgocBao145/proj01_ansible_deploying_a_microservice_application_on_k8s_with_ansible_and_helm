@@ -1,0 +1,151 @@
+---
+- name: Install Traefik and publish Online Boutique through Ingress
+  hosts: k8s-master
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../vars/helm.yml
+    - ../vars/microservices.yml
+    - ../vars/ingress.yml
+
+  roles:
+    - role: geerlingguy.helm
+
+  tasks:
+    - name: Ensure pip is installed.
+      ansible.builtin.apt:
+        name: python3-pip
+        state: present
+
+    - name: Install Python libraries required by Kubernetes modules.
+      ansible.builtin.pip:
+        executable: pip3
+        name:
+          - kubernetes==29.0.0
+          - PyYAML>=6.0
+          - jsonpatch>=1.32
+        state: present
+
+    - name: Register the Traefik Helm chart repository.
+      kubernetes.core.helm_repository:
+        name: "{{ traefik_chart_repository_name }}"
+        repo_url: "{{ traefik_chart_repository_url }}"
+        state: present
+
+    - name: Install Traefik from its Helm chart repository.
+      kubernetes.core.helm:
+        name: "{{ ingress_release_name }}"
+        chart_ref: "{{ traefik_chart_repository_name }}/traefik"
+        chart_version: "{{ traefik_chart_version }}"
+        release_namespace: "{{ ingress_controller_namespace }}"
+        create_namespace: true
+        kubeconfig: /etc/kubernetes/admin.conf
+        update_repo_cache: true
+        values:
+          deployment:
+            replicas: 1
+          providers:
+            kubernetesIngress:
+              enabled: true
+              ingressClass: traefik
+          service:
+            spec:
+              type: NodePort
+          ports:
+            web:
+              nodePort: "{{ ingress_http_node_port | int }}"
+        state: present
+        wait: true
+        timeout: 10m0s
+
+    - name: Read the frontend Service before creating the Ingress.
+      kubernetes.core.k8s_info:
+        kubeconfig: /etc/kubernetes/admin.conf
+        api_version: v1
+        kind: Service
+        name: frontend
+        namespace: "{{ microservice_namespace }}"
+      register: frontend_service
+      changed_when: false
+
+    - name: Require an internal frontend Service on port 80.
+      ansible.builtin.assert:
+        that:
+          - frontend_service.resources | length == 1
+        fail_msg: Deploy the application first; its frontend Service is missing.
+
+    - name: Confirm the frontend Service has a ClusterIP and uses port 80.
+      ansible.builtin.assert:
+        that:
+          - frontend_service.resources[0].spec.type in ['ClusterIP', 'NodePort']
+          - frontend_service.resources[0].spec.clusterIP is defined
+          - frontend_service.resources[0].spec.ports | length > 0
+          - frontend_service.resources[0].spec.ports[0].port | int == 80
+        fail_msg: The frontend Service must be ClusterIP or NodePort and expose port 80.
+
+    - name: Route the application hostname to the frontend Service.
+      kubernetes.core.k8s:
+        kubeconfig: /etc/kubernetes/admin.conf
+        state: present
+        definition:
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: online-boutique
+            namespace: "{{ microservice_namespace }}"
+          spec:
+            ingressClassName: traefik
+            rules:
+              - host: "{{ ingress_host }}"
+                http:
+                  paths:
+                    - path: /
+                      pathType: Prefix
+                      backend:
+                        service:
+                          name: frontend
+                          port:
+                            number: 80
+
+    - name: Read the Traefik HTTP NodePort.
+      kubernetes.core.k8s_info:
+        kubeconfig: /etc/kubernetes/admin.conf
+        api_version: v1
+        kind: Service
+        name: "{{ ingress_release_name }}"
+        namespace: "{{ ingress_controller_namespace }}"
+      register: traefik_service
+      until: >-
+        traefik_service.resources | length == 1 and
+        traefik_service.resources[0].spec.ports
+        | selectattr('name', 'equalto', 'web')
+        | selectattr('nodePort', 'defined')
+        | list | length == 1
+      retries: 30
+      delay: 5
+      changed_when: false
+
+    - name: Confirm the Ingress entry point is exposed on the configured port.
+      ansible.builtin.assert:
+        that:
+          - traefik_service.resources[0].spec.type == 'NodePort'
+          - >-
+            traefik_service.resources[0].spec.ports
+            | selectattr('name', 'equalto', 'web') | list | length == 1
+
+    - name: Confirm Traefik uses the configured NodePort.
+      ansible.builtin.assert:
+        that:
+          - >-
+            (traefik_service.resources[0].spec.ports
+             | selectattr('name', 'equalto', 'web') | first).nodePort | int
+            == ingress_http_node_port | int
+        fail_msg: Traefik does not expose its web entry point on the expected NodePort.
+
+    - name: Print the hostname-based application URL.
+      ansible.builtin.debug:
+        msg: >-
+          Add {{ hostvars[groups['k8s-nodes'][0]].ansible_host }}
+          {{ ingress_host }} to the client hosts file, then open
+          http://{{ ingress_host }}:{{ ingress_http_node_port }}/
