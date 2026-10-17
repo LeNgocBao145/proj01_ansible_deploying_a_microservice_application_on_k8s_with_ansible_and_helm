@@ -1,0 +1,127 @@
+---
+- name: Measure workload resource use and generate chart values
+  hosts: k8s-master
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../vars/helm.yml
+    - ../vars/microservices.yml
+    - ../vars/measure-resources.yml
+
+  roles:
+    - role: geerlingguy.helm
+
+  tasks:
+    - name: Ensure pip is installed.
+      ansible.builtin.apt:
+        name: python3-pip
+        state: present
+
+    - name: Install Python libraries required by Kubernetes modules.
+      ansible.builtin.pip:
+        executable: pip3
+        name:
+          - kubernetes==29.0.0
+          - PyYAML>=6.0
+          - jsonpatch>=1.32
+        state: present
+
+    - name: Register the Metrics Server Helm chart repository.
+      kubernetes.core.helm_repository:
+        name: metrics-server
+        repo_url: https://kubernetes-sigs.github.io/metrics-server/
+        state: present
+
+    - name: Install Metrics Server from its official Helm chart.
+      kubernetes.core.helm:
+        name: metrics-server
+        chart_ref: metrics-server/metrics-server
+        chart_version: "{{ metrics_server_chart_version }}"
+        release_namespace: kube-system
+        kubeconfig: /etc/kubernetes/admin.conf
+        update_repo_cache: true
+        values:
+          args:
+            - --kubelet-insecure-tls
+            - --kubelet-preferred-address-types=InternalIP,Hostname,ExternalIP
+        state: present
+        wait: true
+        timeout: 10m0s
+
+    - name: Wait for the Metrics API to return node measurements.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig=/etc/kubernetes/admin.conf
+          - get
+          - --raw
+          - /apis/metrics.k8s.io/v1beta1/nodes
+      register: metrics_api
+      until: metrics_api.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Capture repeated pod and container usage samples.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig=/etc/kubernetes/admin.conf
+          - top
+          - pods
+          - -n
+          - "{{ microservice_namespace }}"
+          - --containers
+          - --no-headers
+      register: resource_metrics
+      until: resource_metrics.rc == 0 and resource_metrics.stdout_lines | length > 0
+      retries: 10
+      delay: 10
+      changed_when: false
+      loop: "{{ range(0, resource_sample_count) | list }}"
+      loop_control:
+        pause: "{{ resource_sample_interval }}"
+        label: "sample {{ item | int + 1 }}/{{ resource_sample_count }}"
+
+    - name: Create the local report directory.
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../reports"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      become: false
+
+    - name: Save the raw measurements for the project report.
+      ansible.builtin.copy:
+        dest: "{{ resource_sample_file }}"
+        mode: '0644'
+        content: |
+          # Captured by playbooks/measure-resources.yml from kubectl top.
+          # Each block is one sampling interval with the Ansible task finish time.
+          {% for sample in resource_metrics.results %}
+          # Sample {{ loop.index }} collected by command ending at {{ sample.end | default('unknown time') }}
+          {{ sample.stdout }}
+          {% endfor %}
+      delegate_to: localhost
+      become: false
+
+    - name: Derive requests and limits from the observed peaks.
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../scripts/derive_resource_profiles.py"
+          - --input
+          - "{{ resource_sample_file }}"
+          - --output
+          - "{{ resource_profile_file }}"
+          - --workloads
+          - "{{ resource_workloads | join(',') }}"
+      delegate_to: localhost
+      become: false
+      register: generated_profiles
+      changed_when: true
+
+    - name: Show the measurement-derived profile summary.
+      ansible.builtin.debug:
+        var: generated_profiles.stdout

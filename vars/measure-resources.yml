@@ -1,0 +1,21 @@
+---
+# Metrics Server Helm chart version (this is not the Metrics Server app version).
+metrics_server_chart_version: "3.12.2"
+
+# Capture ten minutes of container CPU and memory samples.
+resource_sample_count: 20
+resource_sample_interval: 30
+resource_workloads:
+  - adservice
+  - cartservice
+  - checkoutservice
+  - currencyservice
+  - emailservice
+  - frontend
+  - paymentservice
+  - productcatalogservice
+  - recommendationservice
+  - shippingservice
+
+resource_sample_file: "{{ playbook_dir }}/../reports/part5-resource-samples.txt"
+resource_profile_file: "{{ playbook_dir }}/../vars/resource-profiles.yml"

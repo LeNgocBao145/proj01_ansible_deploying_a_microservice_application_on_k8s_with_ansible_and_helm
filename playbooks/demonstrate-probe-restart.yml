@@ -1,0 +1,140 @@
+---
+- name: Demonstrate and recover from a liveness-probe restart
+  hosts: k8s-master
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../vars/helm.yml
+    - ../vars/microservices.yml
+    - ../vars/resource-profiles.yml
+
+  roles:
+    - role: geerlingguy.helm
+
+  tasks:
+    - name: Ensure pip is installed.
+      ansible.builtin.apt:
+        name: python3-pip
+        state: present
+
+    - name: Install Python libraries required by Kubernetes modules.
+      ansible.builtin.pip:
+        executable: pip3
+        name:
+          - kubernetes==29.0.0
+          - PyYAML>=6.0
+          - jsonpatch>=1.32
+        state: present
+
+    - name: Copy the vendored chart to the control plane.
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../charts/microservice/"
+        dest: "{{ microservice_vendored_chart_path }}/"
+        mode: preserve
+
+    - name: Read the current frontend Deployment.
+      kubernetes.core.k8s_info:
+        kubeconfig: /etc/kubernetes/admin.conf
+        api_version: apps/v1
+        kind: Deployment
+        name: frontend
+        namespace: "{{ microservice_namespace }}"
+      register: frontend_before_probe_test
+      changed_when: false
+
+    - name: Require an already deployed frontend with at least one replica.
+      ansible.builtin.assert:
+        that:
+          - frontend_before_probe_test.resources | length == 1
+          - frontend_before_probe_test.resources[0].spec.replicas | int >= 1
+        fail_msg: Deploy Online Boutique before running the probe restart demonstration.
+
+    - name: Save the current replica count for Helm recovery.
+      ansible.builtin.set_fact:
+        frontend_replicas_before_probe_test: "{{ frontend_before_probe_test.resources[0].spec.replicas | int }}"
+
+    - name: Select the frontend Helm configuration.
+      ansible.builtin.set_fact:
+        frontend_release: "{{ microservice_releases | selectattr('name', 'equalto', 'frontendservice') | first }}"
+
+    - name: Force the liveness probe to fail, observe a container restart, and restore the chart.
+      block:
+        - name: Set a temporary unreachable liveness probe port.
+          kubernetes.core.k8s:
+            kubeconfig: /etc/kubernetes/admin.conf
+            state: present
+            definition:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: frontend
+                namespace: "{{ microservice_namespace }}"
+              spec:
+                template:
+                  spec:
+                    containers:
+                      - name: frontend
+                        livenessProbe:
+                          httpGet:
+                            port: 65534
+          register: bad_probe_result
+
+        - name: Wait until a frontend container restart is recorded.
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - --kubeconfig=/etc/kubernetes/admin.conf
+              - get
+              - pods
+              - --namespace={{ microservice_namespace }}
+              - --selector=app=frontend
+              - "--output=jsonpath={range .items[*]}{.status.containerStatuses[0].restartCount}{' '}{end}"
+          register: frontend_restart_counts
+          until: >-
+            frontend_restart_counts.rc == 0 and
+            frontend_restart_counts.stdout.split()
+            | map('int') | select('gt', 0) | list | length > 0
+          retries: 30
+          delay: 5
+          changed_when: false
+      always:
+        - name: Restore the frontend Helm release with its valid probes and prior replica count.
+          kubernetes.core.helm:
+            name: frontendservice
+            chart_ref: "{{ microservice_vendored_chart_path }}"
+            release_namespace: "{{ microservice_namespace }}"
+            kubeconfig: /etc/kubernetes/admin.conf
+            values_files:
+              - "{{ microservice_source_path }}/values/frontend-values.yaml"
+            values: >-
+              {{ microservice_common_values
+                 | combine(frontend_release.overrides | default({}), recursive=true)
+                 | combine({'appReplicas': frontend_replicas_before_probe_test | int}, recursive=true)
+                 | combine({'resources': microservice_resource_profiles.get('frontend', {})}, recursive=true) }}
+            state: present
+            wait: true
+            timeout: 10m0s
+
+    - name: Confirm the frontend Deployment is healthy after recovery.
+      kubernetes.core.k8s_info:
+        kubeconfig: /etc/kubernetes/admin.conf
+        api_version: apps/v1
+        kind: Deployment
+        name: frontend
+        namespace: "{{ microservice_namespace }}"
+      register: frontend_after_probe_test
+      until: >-
+        frontend_after_probe_test.resources | length == 1 and
+        frontend_after_probe_test.resources[0].status.availableReplicas | default(0) | int
+        >= frontend_replicas_before_probe_test | int
+      retries: 60
+      delay: 10
+      changed_when: false
+
+    - name: Show the restart evidence collected before recovery.
+      ansible.builtin.debug:
+        msg: >-
+          Frontend restart counts while the invalid liveness probe was active:
+          {{ frontend_restart_counts.stdout | default('restart was not observed') }}.
+          The valid Helm probe configuration has now been restored.
