@@ -6,6 +6,7 @@
 
   vars_files:
     - ../vars/microservices.yml
+    - ../vars/ingress.yml
 
   vars:
     microservice_expected_deployments:
@@ -100,11 +101,15 @@
       ansible.builtin.assert:
         that:
           - checkoutservice_service.resources | length == 1
+        fail_msg: The checkoutservice Service is missing.
+
+    - name: Confirm checkoutservice selects pods with the expected label.
+      ansible.builtin.assert:
+        that:
           - checkoutservice_service.resources[0].spec.selector.app == 'checkoutservice'
         fail_msg: >-
-          The checkoutservice Service is missing or does not select pods labeled
-          app=checkoutservice. Check the upstream chart values and the appName
-          override in vars/microservices.yml.
+          The checkoutservice Service does not select app=checkoutservice. Check
+          the upstream chart values and appName override in vars/microservices.yml.
         success_msg: >-
           The checkoutservice Service exists and selects the expected checkoutservice pods.
 
@@ -138,22 +143,83 @@
           - frontend_service.resources | length == 1
         fail_msg: The frontend Service is missing.
 
-    - name: Confirm the frontend Service has a NodePort port.
+    - name: Confirm the frontend Service has a ClusterIP and exposes port 80.
       ansible.builtin.assert:
         that:
-          - frontend_service.resources[0].spec.type == 'NodePort'
+          - frontend_service.resources[0].spec.type in ['ClusterIP', 'NodePort']
+          - frontend_service.resources[0].spec.clusterIP is defined
           - frontend_service.resources[0].spec.ports | length > 0
-          - frontend_service.resources[0].spec.ports[0].nodePort is defined
-        fail_msg: The frontend Service is not configured with a NodePort.
-        success_msg: >-
-          Frontend NodePort is
-          {{ frontend_service.resources[0].spec.ports[0].nodePort }}.
+          - frontend_service.resources[0].spec.ports[0].port | int == 80
+        fail_msg: The frontend Service must be ClusterIP or NodePort and expose port 80.
+        success_msg: The frontend Service has an internal ClusterIP and exposes port 80.
 
-    - name: Request the storefront through a worker NodePort.
+    - name: Read the Online Boutique Ingress.
+      kubernetes.core.k8s_info:
+        kubeconfig: /etc/kubernetes/admin.conf
+        api_version: networking.k8s.io/v1
+        kind: Ingress
+        name: online-boutique
+        namespace: "{{ microservice_namespace }}"
+      register: application_ingress
+      changed_when: false
+
+    - name: Confirm the application Ingress hostname and backend.
+      ansible.builtin.assert:
+        that:
+          - application_ingress.resources | length == 1
+        fail_msg: The Online Boutique Ingress is missing.
+
+    - name: Confirm the Ingress hostname and backend are correct.
+      ansible.builtin.assert:
+        that:
+          - application_ingress.resources[0].spec.ingressClassName == 'traefik'
+          - application_ingress.resources[0].spec.rules[0].host == ingress_host
+          - application_ingress.resources[0].spec.rules[0].http.paths[0].backend.service.name == 'frontend'
+          - application_ingress.resources[0].spec.rules[0].http.paths[0].backend.service.port.number | int == 80
+        fail_msg: The Ingress does not route the configured hostname to frontend:80.
+        success_msg: The Ingress routes the configured hostname to frontend:80.
+
+    - name: Read the Traefik NodePort Service.
+      kubernetes.core.k8s_info:
+        kubeconfig: /etc/kubernetes/admin.conf
+        api_version: v1
+        kind: Service
+        name: "{{ ingress_release_name }}"
+        namespace: "{{ ingress_controller_namespace }}"
+      register: traefik_service
+      changed_when: false
+
+    - name: Confirm the Traefik Service exists.
+      ansible.builtin.assert:
+        that:
+          - traefik_service.resources | length == 1
+        fail_msg: The Traefik Service is missing.
+
+    - name: Confirm Traefik exposes the web NodePort.
+      ansible.builtin.assert:
+        that:
+          - traefik_service.resources[0].spec.type == 'NodePort'
+          - >-
+            traefik_service.resources[0].spec.ports
+            | selectattr('name', 'equalto', 'web') | list | length == 1
+
+    - name: Confirm Traefik uses the configured web NodePort.
+      ansible.builtin.assert:
+        that:
+          - >-
+            (traefik_service.resources[0].spec.ports
+             | selectattr('name', 'equalto', 'web') | first).nodePort | int
+            == ingress_http_node_port | int
+        fail_msg: Traefik does not expose the web entry point on the configured NodePort.
+        success_msg: Traefik web entry point is published on NodePort {{ ingress_http_node_port }}.
+
+    - name: Request the storefront through hostname-based Ingress routing.
       ansible.builtin.uri:
-        url: "http://{{ hostvars[groups['k8s-nodes'][0]].ansible_host }}:{{ frontend_service.resources[0].spec.ports[0].nodePort }}/"
+        url: "http://{{ hostvars[groups['k8s-nodes'][0]].ansible_host }}:{{ ingress_http_node_port }}/"
         method: GET
         return_content: true
+        headers:
+          Host: "{{ ingress_host }}"
         status_code: 200
         timeout: 30
       register: storefront_response
@@ -166,8 +232,8 @@
         fail_msg: The frontend returned HTTP 200 but its response did not identify Online Boutique.
         success_msg: The Online Boutique storefront returned HTTP 200.
 
-    - name: Print the verified storefront URL.
+    - name: Print the verified hostname URL.
       ansible.builtin.debug:
         msg: >-
-          Online Boutique is available at
-          http://{{ hostvars[groups['k8s-nodes'][0]].ansible_host }}:{{ frontend_service.resources[0].spec.ports[0].nodePort }}/
+          Online Boutique Ingress is available at
+          http://{{ ingress_host }}:{{ ingress_http_node_port }}/

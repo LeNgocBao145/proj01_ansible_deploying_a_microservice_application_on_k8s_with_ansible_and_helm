@@ -5,35 +5,137 @@ microservice_source: https://github.com/iankisali/microservice-deployment.git
 microservice_source_version: main
 microservice_source_path: /opt/microservice-deployment
 microservice_namespace: microservice
+microservice_vendored_chart_path: /opt/proj01/charts/microservice
 
 microservice_common_values:
   appReplicas: 1
 
 microservice_releases:
+  # cartservice needs Redis while starting; install it before dependent apps.
+  - name: redis-cart
+    workload_name: redis-cart
+    chart: chart/redis
+    values_file: values/redis-values.yaml
   - name: adservice
+    workload_name: adservice
     values_file: values/ad-service-values.yaml
+    overrides:
+      livenessProbe: &grpc_probe_ad
+        grpc:
+          port: 9555
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+      readinessProbe: *grpc_probe_ad
   - name: cartservice
+    workload_name: cartservice
     values_file: values/cart-service-values.yaml
+    overrides:
+      livenessProbe: &grpc_probe_cart
+        grpc:
+          port: 7070
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+      readinessProbe: *grpc_probe_cart
   - name: checkoutservice
+    workload_name: checkoutservice
     values_file: values/checkout-service-values.yaml
     overrides:
       appName: checkoutservice
+      livenessProbe: &grpc_probe_checkout
+        grpc:
+          port: 5050
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+      readinessProbe: *grpc_probe_checkout
   - name: currencyservice
+    workload_name: currencyservice
     values_file: values/currency-service-values.yaml
+    overrides:
+      livenessProbe: &grpc_probe_currency
+        grpc:
+          port: 7000
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+      readinessProbe: *grpc_probe_currency
   - name: emailservice
+    workload_name: emailservice
     values_file: values/email-service-values.yaml
+    overrides:
+      livenessProbe: &grpc_probe_email
+        grpc:
+          port: 8080
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+      readinessProbe: *grpc_probe_email
   - name: frontendservice
+    workload_name: frontend
     values_file: values/frontend-values.yaml
     overrides:
       serviceType: NodePort
+      livenessProbe: &frontend_probe
+        httpGet:
+          path: /_healthz
+          port: 8080
+        initialDelaySeconds: 15
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+      readinessProbe: *frontend_probe
   - name: paymentservice
+    workload_name: paymentservice
     values_file: values/payment-service-values.yaml
+    overrides:
+      livenessProbe: &grpc_probe_payment
+        grpc:
+          port: 50051
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+      readinessProbe: *grpc_probe_payment
   - name: productcatalogservice
+    workload_name: productcatalogservice
     values_file: values/productcatalog-service-values.yaml
+    overrides:
+      livenessProbe: &grpc_probe_catalog
+        grpc:
+          port: 3550
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+      readinessProbe: *grpc_probe_catalog
   - name: recommendationservice
+    workload_name: recommendationservice
     values_file: values/recommendation-service-values.yaml
+    overrides:
+      livenessProbe: &grpc_probe_recommendation
+        grpc:
+          port: 8080
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+      readinessProbe: *grpc_probe_recommendation
   - name: shippingservice
+    workload_name: shippingservice
     values_file: values/shipping-service-values.yaml
-  - name: redis-cart
-    chart: chart/redis
-    values_file: values/redis-values.yaml
+    overrides:
+      livenessProbe: &grpc_probe_shipping
+        grpc:
+          port: 50051
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+      readinessProbe: *grpc_probe_shipping

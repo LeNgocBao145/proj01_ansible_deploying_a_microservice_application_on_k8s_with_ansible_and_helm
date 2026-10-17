@@ -5,7 +5,9 @@
   gather_facts: true
 
   vars_files:
+    - ../vars/helm.yml
     - ../vars/microservices.yml
+    - ../vars/ingress.yml
 
   roles:
     - role: geerlingguy.helm
@@ -33,9 +35,38 @@
         state: absent
         wait: true
         timeout: 10m0s
-      loop: "{{ microservice_releases }}"
+      # Remove dependent workloads first and Redis last.
+      loop: "{{ microservice_releases | reverse | list }}"
       loop_control:
         label: "{{ item.name }}"
+
+    - name: Remove the Traefik ingress controller.
+      kubernetes.core.helm:
+        name: "{{ ingress_release_name }}"
+        release_namespace: "{{ ingress_controller_namespace }}"
+        kubeconfig: /etc/kubernetes/admin.conf
+        state: absent
+        wait: true
+        timeout: 10m0s
+
+    - name: Remove the Metrics Server release used for workload measurements.
+      kubernetes.core.helm:
+        name: metrics-server
+        release_namespace: kube-system
+        kubeconfig: /etc/kubernetes/admin.conf
+        state: absent
+        wait: true
+        timeout: 10m0s
+
+    - name: Remove the Ingress controller namespace.
+      kubernetes.core.k8s:
+        kubeconfig: /etc/kubernetes/admin.conf
+        state: absent
+        api_version: v1
+        kind: Namespace
+        name: "{{ ingress_controller_namespace }}"
+        wait: true
+        wait_timeout: 300
 
     - name: Remove the application namespace.
       kubernetes.core.k8s:

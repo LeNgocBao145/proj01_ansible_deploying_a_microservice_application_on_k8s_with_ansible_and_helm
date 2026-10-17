@@ -7,6 +7,7 @@
   vars_files:
     - ../vars/helm.yml
     - ../vars/microservices.yml
+    - ../vars/resource-profiles.yml
 
   roles:
     - role: geerlingguy.helm
@@ -91,15 +92,32 @@
           metadata:
             name: "{{ microservice_namespace }}"
 
+    - name: Create the vendored chart parent directory.
+      ansible.builtin.file:
+        path: "{{ microservice_vendored_chart_path | dirname }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy the extended vendored microservice chart to the control plane.
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../charts/microservice/"
+        dest: "{{ microservice_vendored_chart_path }}/"
+        mode: preserve
+
     - name: Install all eleven application components with Helm.
       kubernetes.core.helm:
         name: "{{ item.name }}"
-        chart_ref: "{{ microservice_source_path }}/{{ item.chart | default('chart/microservice') }}"
+        chart_ref: "{{ microservice_source_path ~ '/' ~ item.chart if item.chart is defined else microservice_vendored_chart_path }}"
         release_namespace: "{{ microservice_namespace }}"
         kubeconfig: /etc/kubernetes/admin.conf
         values_files:
           - "{{ microservice_source_path }}/{{ item.values_file }}"
-        values: "{{ microservice_common_values | combine(item.overrides | default({})) }}"
+        values: >-
+          {{ microservice_common_values
+             | combine(item.overrides | default({}), recursive=true)
+             | combine({'resources': microservice_resource_profiles.get(item.workload_name, {})}, recursive=true)
+             if item.name != 'redis-cart'
+             else microservice_common_values | combine(item.overrides | default({}), recursive=true) }}
         state: present
         wait: true
         timeout: 10m0s
@@ -117,13 +135,15 @@
       register: frontend_service
       until: >-
         frontend_service.resources | length > 0 and
-        frontend_service.resources[0].spec.ports[0].nodePort is defined
+        frontend_service.resources[0].spec.type in ['ClusterIP', 'NodePort'] and
+        frontend_service.resources[0].spec.clusterIP is defined
       retries: 30
       delay: 10
       changed_when: false
 
-    - name: Print the Online Boutique URL.
+    - name: Print the next command for the Ingress endpoint.
       ansible.builtin.debug:
         msg: >-
-          Online Boutique is available at
-          http://{{ hostvars[groups['k8s-nodes'][0]].ansible_host }}:{{ frontend_service.resources[0].spec.ports[0].nodePort }}/
+          Frontend Service is ready. Run
+          ansible-playbook -i inventory playbooks/ingress.yml to publish it
+          through the hostname-based Ingress.

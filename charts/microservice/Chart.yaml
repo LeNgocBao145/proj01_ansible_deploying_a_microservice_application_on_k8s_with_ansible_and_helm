@@ -1,0 +1,9 @@
+apiVersion: v2
+name: microservice
+description: Vendored extension of iankisali/microservice-deployment for measured resources and health probes.
+type: application
+version: 0.2.0
+appVersion: "1.16.0"
+annotations:
+  upstream: https://github.com/iankisali/microservice-deployment/tree/main/chart/microservice
+  upstream-chart-version: "0.1.0"
